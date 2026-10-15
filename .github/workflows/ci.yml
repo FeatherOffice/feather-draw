@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Os ícones são SVG embutidos: o mesmo teste precisa passar no Linux e no
+# Windows, que são os dois sistemas em que a suíte é distribuída.
+jobs:
+  testes:
+    name: Testes — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Testes
+        run: cargo test --locked
+      - name: Clippy
+        run: cargo clippy --all-targets --locked
