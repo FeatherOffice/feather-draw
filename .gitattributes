@@ -1,0 +1,3 @@
+# Os snapshots dourados são comparados byte a byte: sem conversão de fim de linha no Windows.
+* text=auto eol=lf
+fixtures/** -text
