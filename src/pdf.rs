@@ -4,6 +4,7 @@
 //! não suportados causam erro explícito, nunca substituição silenciosa.
 use crate::{caminhos::{Caminho, Comando, RegraPreenchimento},
     estilos::{Extremo, Juncao, Preenchimento}, Cena, Cor, Figura};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +14,117 @@ pub enum ErroPdf {
     EstiloInvalido,
     AlfaGradienteVariavel,
     CaractereNaoSuportado,
+    /// O arquivo passado a `DocumentoPdf::fonte` não é uma fonte TrueType (com contornos `glyf`).
+    FonteInvalida,
+}
+
+/// Uma fonte TrueType embutida no documento (devolvida por `DocumentoPdf::fonte`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FonteEmbutida(usize);
+
+/// Para onde um link leva: um endereço ou um ponto de uma página (`y` a partir do topo).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DestinoPdf {
+    Url(String),
+    Pagina { indice: usize, y: f32 },
+}
+
+/// Os dados do documento que o leitor de PDF mostra em Propriedades (vazio = não grava).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MetadadosPdf {
+    pub titulo: String,
+    pub autor: String,
+    pub assunto: String,
+    pub palavras_chave: String,
+    pub criador: String,
+}
+
+#[derive(Debug, Clone)]
+struct Embutida {
+    dados: Vec<u8>,
+    nome: String,
+}
+
+/// Um fluxo comprimido (`FlateDecode`) com as chaves `extra` no dicionário.
+fn fluxo_comprimido(extra: &str, dados: &[u8]) -> Vec<u8> {
+    let z = miniz_oxide::deflate::compress_to_vec_zlib(dados, 6);
+    let mut obj = format!("<< {extra}/Filter /FlateDecode /Length {} >>\nstream\n", z.len()).into_bytes();
+    obj.extend_from_slice(&z);
+    obj.extend_from_slice(b"\nendstream");
+    obj
+}
+
+/// Texto do PDF em UTF-16BE (`<FEFF…>`): título, autor, marcador.
+fn texto_unicode(s: &str) -> String {
+    let mut saida = String::from("<FEFF");
+    for u in s.encode_utf16() {
+        write!(saida, "{u:04X}").unwrap();
+    }
+    saida.push('>');
+    saida
+}
+
+/// Endereço como string literal do PDF: ASCII, com `( ) \\` escapados e o resto em `%XX`.
+fn url_literal(u: &str) -> String {
+    let mut saida = String::from("(");
+    for b in u.bytes() {
+        match b {
+            b'(' | b')' | b'\\' => { saida.push('\\'); saida.push(b as char); }
+            0x21..=0x7e => saida.push(b as char),
+            _ => write!(saida, "%{b:02X}").unwrap(),
+        }
+    }
+    saida.push(')');
+    saida
+}
+
+/// Os objetos de uma fonte embutida (Type0 + CIDFontType2, CID = código Unicode) e o id do Type0.
+fn objetos_da_fonte(doc: &mut Documentos, f: &Embutida, usados: &BTreeSet<u16>) -> Result<usize, ErroPdf> {
+    let face = ttf_parser::Face::parse(&f.dados, 0).map_err(|_| ErroPdf::FonteInvalida)?;
+    let upem = f32::from(face.units_per_em());
+    let em = |v: f32| (v * 1000.0 / upem).round() as i32;
+    let gid = |cid: u16| char::from_u32(u32::from(cid)).and_then(|c| face.glyph_index(c)).map_or(0, |g| g.0);
+    // shortcut: a fonte vai inteira (sem subconjunto); fazer o subconjunto se o tamanho do PDF incomodar.
+    let arquivo = doc.adicionar(fluxo_comprimido(&format!("/Length1 {} ", f.dados.len()), &f.dados));
+    let caixa = face.global_bounding_box();
+    let italico = face.is_italic();
+    let descritor = doc.adicionar(format!(
+        "<< /Type /FontDescriptor /FontName /{} /Flags {} /FontBBox [{} {} {} {}] /ItalicAngle {} /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 {arquivo} 0 R >>",
+        f.nome, 32 + if italico { 64 } else { 0 },
+        em(caixa.x_min.into()), em(caixa.y_min.into()), em(caixa.x_max.into()), em(caixa.y_max.into()),
+        num(face.italic_angle())?, em(face.ascender().into()), em(face.descender().into()),
+        em(face.capital_height().unwrap_or(face.ascender()).into()),
+    ));
+    let maior = usados.last().copied().unwrap_or(0);
+    let mut mapa = vec![0u8; 2 * (usize::from(maior) + 1)];
+    let mut larguras = String::new();
+    for &cid in usados {
+        let g = gid(cid);
+        mapa[2 * usize::from(cid)..2 * usize::from(cid) + 2].copy_from_slice(&g.to_be_bytes());
+        let avanco = face.glyph_hor_advance(ttf_parser::GlyphId(g)).unwrap_or(0);
+        write!(larguras, "{cid} [{}] ", em(avanco.into())).unwrap();
+    }
+    let mapa = doc.adicionar(fluxo_comprimido("", &mapa));
+    let cid = doc.adicionar(format!(
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {descritor} 0 R /W [{larguras}] /CIDToGIDMap {mapa} 0 R >>",
+        f.nome
+    ));
+    // ToUnicode: o CID já é o código, então o texto copiado do PDF sai igual.
+    let mut cmap = String::from("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+    let lista: Vec<u16> = usados.iter().copied().collect();
+    for bloco in lista.chunks(100) {
+        writeln!(cmap, "{} beginbfchar", bloco.len()).unwrap();
+        for c in bloco {
+            writeln!(cmap, "<{c:04X}> <{c:04X}>").unwrap();
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend");
+    let unicode = doc.adicionar(fluxo_comprimido("", cmap.as_bytes()));
+    Ok(doc.adicionar(format!(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /{} /Encoding /Identity-H /DescendantFonts [{cid} 0 R] /ToUnicode {unicode} 0 R >>",
+        f.nome
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,7 +227,7 @@ impl Documentos {
     fn adicionar(&mut self, bytes: impl Into<Vec<u8>>) -> usize {
         self.objetos.push(bytes.into()); self.objetos.len()
     }
-    fn gerar(self, root: usize) -> Vec<u8> {
+    fn gerar(self, root: usize, info: Option<usize>) -> Vec<u8> {
         let total = self.objetos.len() + 1;
         let mut saida = b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n".to_vec();
         let mut offsets = Vec::with_capacity(total);
@@ -132,7 +244,8 @@ impl Documentos {
             saida.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
         }
         saida.extend_from_slice(format!(
-            "trailer\n<< /Size {total} /Root {root} 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+            "trailer\n<< /Size {total} /Root {root} 0 R{} >>\nstartxref\n{xref}\n%%EOF\n",
+            info.map_or(String::new(), |i| format!(" /Info {i} 0 R"))
         ).as_bytes());
         saida
     }
@@ -323,7 +436,7 @@ impl Emissor {
         self.doc.objetos[paginas - 1] =
             format!("<< /Type /Pages /Count 1 /Kids [{pagina} 0 R] >>").into_bytes();
         let catalogo = self.doc.adicionar(format!("<< /Type /Catalog /Pages {paginas} 0 R >>"));
-        self.doc.gerar(catalogo)
+        self.doc.gerar(catalogo, None)
     }
 }
 
@@ -448,6 +561,10 @@ pub fn largura_texto(texto: &str, fonte: FontePdf, tamanho: f32) -> f32 {
 pub struct DocumentoPdf {
     paginas: Vec<PaginaPdf>,
     substituir: bool,
+    embutidas: Vec<Embutida>,
+    /// (nível, título, página, y a partir do topo).
+    marcadores: Vec<(u8, String, usize, f32)>,
+    metadados: Option<MetadadosPdf>,
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +578,10 @@ pub struct PaginaPdf {
     extras: bool,
     /// Imagens RGB cruas da página: (bytes, largura, altura) em pixels; `/Im1`… na ordem.
     imagens: Vec<(Vec<u8>, u32, u32)>,
+    /// Os caracteres usados de cada fonte embutida (para as larguras e o mapa de glifos).
+    usados: BTreeMap<usize, BTreeSet<u16>>,
+    /// Áreas clicáveis: (x, y, largura, altura) a partir do topo e o destino.
+    links: Vec<([f32; 4], DestinoPdf)>,
 }
 
 impl DocumentoPdf {
@@ -480,8 +601,44 @@ impl DocumentoPdf {
             largura: largura_pt, altura: altura_pt, conteudo: String::new(),
             erro: if valida { None } else { Some(ErroPdf::DimensaoInvalida) },
             recortes: 0, substituir: self.substituir, extras: false, imagens: Vec::new(),
+            usados: BTreeMap::new(), links: Vec::new(),
         });
         self.paginas.last_mut().unwrap()
+    }
+
+    /// Registra uma fonte TrueType (o arquivo `.ttf` inteiro) para `PaginaPdf::texto_embutido`.
+    /// Ela só entra no PDF se alguma página a usar.
+    pub fn fonte(&mut self, dados: Vec<u8>) -> Result<FonteEmbutida, ErroPdf> {
+        let face = ttf_parser::Face::parse(&dados, 0).map_err(|_| ErroPdf::FonteInvalida)?;
+        if face.tables().glyf.is_none() {
+            return Err(ErroPdf::FonteInvalida);
+        }
+        // O nome PostScript pode estar só na entrada do Mac (bytes ASCII), que `to_string` não lê.
+        let nome: String = face.names().into_iter()
+            .filter(|n| n.name_id == ttf_parser::name_id::POST_SCRIPT_NAME)
+            .find_map(|n| n.to_string().or_else(|| n.name.is_ascii().then(|| String::from_utf8_lossy(n.name).into_owned())))
+            .unwrap_or_default()
+            .chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+        let nome = if nome.is_empty() { format!("Fonte{}", self.embutidas.len() + 1) } else { nome };
+        self.embutidas.push(Embutida { dados, nome });
+        Ok(FonteEmbutida(self.embutidas.len() - 1))
+    }
+
+    /// Título, autor, assunto e palavras-chave (Propriedades do leitor de PDF).
+    pub fn metadados(&mut self, m: MetadadosPdf) -> &mut Self {
+        self.metadados = Some(m);
+        self
+    }
+
+    /// Um marcador (a árvore lateral do leitor): `nivel` 1 é o de cima; leva à `pagina` na altura `y`.
+    pub fn marcador(&mut self, nivel: u8, titulo: &str, pagina: usize, y: f32) -> &mut Self {
+        self.marcadores.push((nivel.max(1), titulo.to_string(), pagina, y));
+        self
+    }
+
+    /// A página `i` já adicionada (para pôr links depois de saber onde ficam os destinos).
+    pub fn pagina(&mut self, i: usize) -> Option<&mut PaginaPdf> {
+        self.paginas.get_mut(i)
     }
 
     pub fn finalizar(self) -> Result<Vec<u8>, ErroPdf> {
@@ -499,21 +656,33 @@ impl DocumentoPdf {
         for (i, id) in fontes.iter().enumerate() {
             write!(fontes_dic, "/F{} {id} 0 R ", i + 1).unwrap();
         }
+        let mut usados: BTreeMap<usize, BTreeSet<u16>> = BTreeMap::new();
+        for p in &self.paginas {
+            for (f, cs) in &p.usados {
+                usados.entry(*f).or_default().extend(cs);
+            }
+        }
+        for (f, cs) in &usados {
+            let e = self.embutidas.get(*f).ok_or(ErroPdf::FonteInvalida)?;
+            let id = objetos_da_fonte(&mut doc, e, cs)?;
+            write!(fontes_dic, "/E{} {id} 0 R ", f + 1).unwrap();
+        }
         fontes_dic.push_str(">>");
         let pages = doc.adicionar(Vec::new());
-        let mut kids = Vec::new();
-        for p in &self.paginas {
+        // Os ids das páginas antes do conteúdo: links e marcadores apontam para elas.
+        let kids: Vec<usize> = self.paginas.iter().map(|_| doc.adicionar(Vec::new())).collect();
+        let destino = |indice: usize, y: f32| -> Option<String> {
+            let p = self.paginas.get(indice)?;
+            Some(format!("[{} 0 R /XYZ 0 {} null]", kids[indice], num(p.altura - y).ok()?))
+        };
+        for (k, p) in self.paginas.iter().enumerate() {
             // Sem imagem, o dicionário de recursos fica igual ao de antes (PDFs antigos não mudam).
             let mut recursos = format!("<< {fontes_dic} ");
             if !p.imagens.is_empty() {
                 recursos.push_str("/XObject << ");
                 for (i, (dados, w, h)) in p.imagens.iter().enumerate() {
-                    // shortcut: RGB sem compressão (feather-draw não tem deflate); comprimir quando o tamanho do PDF incomodar.
-                    let mut obj = format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} \
-/ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n", dados.len()).into_bytes();
-                    obj.extend_from_slice(dados);
-                    obj.extend_from_slice(b"\nendstream");
-                    let id = doc.adicionar(obj);
+                    let id = doc.adicionar(fluxo_comprimido(&format!("/Type /XObject /Subtype /Image /Width {w} /Height {h} \
+/ColorSpace /DeviceRGB /BitsPerComponent 8 "), dados));
                     write!(recursos, "/Im{} {id} 0 R ", i + 1).unwrap();
                 }
                 recursos.push_str(">> ");
@@ -524,15 +693,85 @@ impl DocumentoPdf {
             c.extend_from_slice(bytes);
             c.extend_from_slice(b"endstream");
             let cid = doc.adicionar(c);
-            kids.push(doc.adicionar(format!(
-                "<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 {} {}] /Resources {recursos} /Contents {cid} 0 R >>",
-                num(p.largura)?, num(p.altura)?)));
+            let mut anotacoes = String::new();
+            for ([x, y, l, a], d) in &p.links {
+                let acao = match d {
+                    DestinoPdf::Url(u) => format!("/A << /S /URI /URI {} >>", url_literal(u)),
+                    DestinoPdf::Pagina { indice, y } => match destino(*indice, *y) {
+                        Some(d) => format!("/Dest {d}"),
+                        None => continue,
+                    },
+                };
+                let id = doc.adicionar(format!(
+                    "<< /Type /Annot /Subtype /Link /Rect [{} {} {} {}] /Border [0 0 0] {acao} >>",
+                    num(*x)?, num(p.altura - y - a)?, num(x + l)?, num(p.altura - y)?));
+                write!(anotacoes, "{id} 0 R ").unwrap();
+            }
+            let anotacoes = if anotacoes.is_empty() { String::new() } else { format!(" /Annots [{}]", anotacoes.trim_end()) };
+            doc.objetos[kids[k] - 1] = format!(
+                "<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 {} {}] /Resources {recursos} /Contents {cid} 0 R{anotacoes} >>",
+                num(p.largura)?, num(p.altura)?).into_bytes();
         }
         let lista = kids.iter().map(|k| format!("{k} 0 R")).collect::<Vec<_>>().join(" ");
         doc.objetos[pages - 1] = format!(
             "<< /Type /Pages /Count {} /Kids [{lista}] >>", kids.len()).into_bytes();
-        let cat = doc.adicionar(format!("<< /Type /Catalog /Pages {pages} 0 R >>"));
-        Ok(doc.gerar(cat))
+        let contornos = self.arvore_de_marcadores(&mut doc, &destino)?;
+        let contornos = contornos.map_or(String::new(), |id| format!(" /Outlines {id} 0 R /PageMode /UseOutlines"));
+        let cat = doc.adicionar(format!("<< /Type /Catalog /Pages {pages} 0 R{contornos} >>"));
+        let info = self.metadados.as_ref().map(|m| {
+            let mut d = String::from("<< ");
+            for (chave, v) in [("Title", &m.titulo), ("Author", &m.autor), ("Subject", &m.assunto), ("Keywords", &m.palavras_chave), ("Creator", &m.criador)] {
+                if !v.is_empty() {
+                    write!(d, "/{chave} {} ", texto_unicode(v)).unwrap();
+                }
+            }
+            d.push_str("/Producer (feather-draw) >>");
+            doc.adicionar(d)
+        });
+        Ok(doc.gerar(cat, info))
+    }
+
+    /// Os objetos dos marcadores (`/Outlines`); os de nível 1 aparecem, os de baixo ficam fechados.
+    fn arvore_de_marcadores(&self, doc: &mut Documentos, destino: &dyn Fn(usize, f32) -> Option<String>) -> Result<Option<usize>, ErroPdf> {
+        let itens: Vec<&(u8, String, usize, f32)> = self.marcadores.iter().filter(|m| destino(m.2, m.3).is_some()).collect();
+        if itens.is_empty() {
+            return Ok(None);
+        }
+        let raiz = doc.adicionar(Vec::new());
+        let ids: Vec<usize> = itens.iter().map(|_| doc.adicionar(Vec::new())).collect();
+        // O pai de cada item: o último antes dele com nível menor.
+        let mut pais: Vec<Option<usize>> = Vec::with_capacity(itens.len());
+        let mut pilha: Vec<usize> = Vec::new();
+        for (i, m) in itens.iter().enumerate() {
+            while pilha.last().is_some_and(|&j| itens[j].0 >= m.0) {
+                pilha.pop();
+            }
+            pais.push(pilha.last().copied());
+            pilha.push(i);
+        }
+        let filhos = |p: Option<usize>| -> Vec<usize> { (0..itens.len()).filter(|&i| pais[i] == p).collect() };
+        let descendentes = |i: usize| -> usize { (i + 1..itens.len()).take_while(|&j| itens[j].0 > itens[i].0).count() };
+        for (i, m) in itens.iter().enumerate() {
+            let irmaos = filhos(pais[i]);
+            let pos = irmaos.iter().position(|&j| j == i).unwrap_or(0);
+            let mut d = format!("<< /Title {} /Parent {} 0 R /Dest {}", texto_unicode(&m.1), pais[i].map_or(raiz, |p| ids[p]), destino(m.2, m.3).unwrap_or_default());
+            if pos > 0 {
+                write!(d, " /Prev {} 0 R", ids[irmaos[pos - 1]]).unwrap();
+            }
+            if let Some(&n) = irmaos.get(pos + 1) {
+                write!(d, " /Next {} 0 R", ids[n]).unwrap();
+            }
+            let meus = filhos(Some(i));
+            if let (Some(a), Some(b)) = (meus.first(), meus.last()) {
+                write!(d, " /First {} 0 R /Last {} 0 R /Count -{}", ids[*a], ids[*b], descendentes(i)).unwrap();
+            }
+            d.push_str(" >>");
+            doc.objetos[ids[i] - 1] = d.into_bytes();
+        }
+        let topo = filhos(None);
+        doc.objetos[raiz - 1] = format!("<< /Type /Outlines /First {} 0 R /Last {} 0 R /Count {} >>",
+            ids[topo[0]], ids[*topo.last().unwrap_or(&topo[0])], topo.len()).into_bytes();
+        Ok(Some(raiz))
     }
 }
 
@@ -614,6 +853,59 @@ impl PaginaPdf {
             fonte.indice()).unwrap();
         for b in bytes { write!(self.conteudo, "{b:02X}").unwrap(); }
         self.conteudo.push_str("> Tj ET\nQ\n");
+    }
+
+    /// Texto numa fonte embutida, com a linha de base em (x, y) e girado `graus` (0 = reto).
+    /// Caractere fora do plano básico do Unicode vira '?'.
+    pub fn texto_embutido(&mut self, x: f32, y: f32, graus: f32, texto: &str, fonte: FonteEmbutida, tamanho: f32, c: Cor) {
+        if !tamanho.is_finite() || tamanho <= 0.0 || !graus.is_finite() { self.falha(ErroPdf::EstiloInvalido); return; }
+        let usados = self.usados.entry(fonte.0).or_default();
+        let mut hex = String::with_capacity(texto.len() * 4);
+        for ch in texto.chars() {
+            let cid = u16::try_from(u32::from(ch)).unwrap_or(u16::from(b'?'));
+            usados.insert(cid);
+            write!(hex, "{cid:04X}").unwrap();
+        }
+        let (sen, cos) = graus.to_radians().sin_cos();
+        let (px, py, t) = (self.n(x), self.n(self.altura - y), self.n(tamanho));
+        let (a, b, c2) = (self.n(cos), self.n(sen), self.n(-sen));
+        write!(self.conteudo, "q\n{}BT /E{} {t} Tf {a} {b} {c2} {a} {px} {py} Tm <{hex}> Tj ET\nQ\n", cor(c, "rg"), fonte.0 + 1).unwrap();
+    }
+
+    /// Um caminho preenchido (coordenadas a partir do topo), como os contornos dos glifos de uma fórmula.
+    pub fn caminho_preenchido(&mut self, caminho: &Caminho, c: Cor) {
+        let mut d = String::new();
+        let mut atual = None;
+        for comando in &caminho.comandos {
+            let (op, pontos): (&str, Vec<crate::Ponto>) = match *comando {
+                Comando::Mover(p) => ("m", vec![p]),
+                Comando::Linha(p) => ("l", vec![p]),
+                Comando::Cubica { controle1, controle2, fim } => ("c", vec![controle1, controle2, fim]),
+                Comando::Quadratica { controle, fim } => {
+                    let Some(a): Option<crate::Ponto> = atual else { self.falha(ErroPdf::GeometriaInvalida); return };
+                    let t = 2.0 / 3.0;
+                    let c1 = crate::Ponto::novo(a.x + (controle.x - a.x) * t, a.y + (controle.y - a.y) * t);
+                    let c2 = crate::Ponto::novo(fim.x + (controle.x - fim.x) * t, fim.y + (controle.y - fim.y) * t);
+                    ("c", vec![c1, c2, fim])
+                }
+                Comando::Fechar => { d.push_str("h\n"); continue; }
+            };
+            for p in &pontos {
+                let (x, y) = (self.n(p.x), self.n(self.altura - p.y));
+                write!(d, "{x} {y} ").unwrap();
+            }
+            atual = pontos.last().copied();
+            writeln!(d, "{op}").unwrap();
+        }
+        let regra = if caminho.regra == RegraPreenchimento::ParImpar { "f*" } else { "f" };
+        write!(self.conteudo, "q\n{}{d}{regra}\nQ\n", cor(c, "rg")).unwrap();
+    }
+
+    /// Uma área clicável (x, y, largura, altura a partir do topo) que leva a `destino`.
+    pub fn link(&mut self, x: f32, y: f32, l: f32, a: f32, destino: DestinoPdf) {
+        if [x, y, l, a].iter().all(|v| v.is_finite()) && l > 0.0 && a > 0.0 {
+            self.links.push(([x, y, l, a], destino));
+        }
     }
 
     /// Texto com a linha de base em (x, y).
@@ -861,6 +1153,31 @@ mod testes {
         let s = String::from_utf8_lossy(&com_serifa.finalizar().unwrap()).into_owned();
         assert!(s.contains("/BaseFont /Times-Roman") && s.contains("/BaseFont /Courier-BoldOblique"));
         assert!(s.contains("BT /F5 10 Tf") && s.contains("BT /F12 10 Tf") && s.contains("/F12 "));
+    }
+
+    #[test]
+    fn links_marcadores_dados_e_fonte_invalida() {
+        let mut d = DocumentoPdf::novo();
+        d.metadados(MetadadosPdf { titulo: "Relatório".into(), autor: "Equipe".into(), ..Default::default() });
+        for _ in 0..2 {
+            d.adicionar_pagina(100.0, 200.0);
+        }
+        let p = d.pagina(0).unwrap();
+        p.link(10.0, 20.0, 30.0, 10.0, DestinoPdf::Url("https://exemplo.org/a b".into()));
+        p.link(10.0, 40.0, 30.0, 10.0, DestinoPdf::Pagina { indice: 1, y: 50.0 });
+        p.link(10.0, 60.0, 30.0, 10.0, DestinoPdf::Pagina { indice: 9, y: 0.0 });
+        d.marcador(1, "Introdução", 0, 0.0).marcador(2, "Objetivos", 0, 80.0).marcador(1, "Conclusão", 1, 10.0);
+        assert_eq!(d.fonte(vec![0; 10]), Err(ErroPdf::FonteInvalida));
+        let pdf = d.finalizar().unwrap();
+        let s = String::from_utf8_lossy(&pdf).into_owned();
+        assert!(s.contains("/URI (https://exemplo.org/a%20b)"));
+        assert!(s.contains("/Rect [10 170 40 180]"));
+        // O link para a página que não existe fica de fora.
+        assert_eq!(s.matches("/Subtype /Link").count(), 2);
+        assert!(s.contains("/XYZ 0 150 null]"));
+        assert!(s.contains("/PageMode /UseOutlines") && s.contains("/Count -1") && s.contains("/Type /Outlines"));
+        assert!(s.contains("/Title <FEFF00520065006C0061007400F300720069006F>"));
+        assert!(s.contains("/Info "));
     }
 
     #[test]

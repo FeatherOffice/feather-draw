@@ -1,6 +1,6 @@
 [package]
 name = "feather-draw"
-version = "0.1.2"
+version = "0.1.3"
 description = "Motor vetorial compartilhado da suíte FeatherOffice: geometria, caminhos, estilos, SVG, PDF, unidades e tinta com pressão da caneta"
 authors = ["FeatherOffice"]
 edition = "2021"
@@ -8,3 +8,8 @@ rust-version = "1.77.2"
 license = "GPL-3.0-only"
 repository = "https://github.com/FeatherOffice/feather-draw"
 publish = false
+
+[dependencies]
+# Fonte embutida no PDF (medidas e glifos) e compressão dos fluxos; os dois são Rust puro.
+ttf-parser = "0.25"
+miniz_oxide = "0.8"
