@@ -1,7 +1,7 @@
 //! Exportador PDF 1.4 vetorial e determinístico, independente de Iced.
 //! Coordenadas da Cena usam origem superior esquerda e pontos PDF.
-//! Fontes base Helvetica usam codificação WinAnsi; caracteres não suportados
-//! causam erro explícito, nunca substituição silenciosa.
+//! Fontes base (Helvetica, Times e Courier) usam codificação WinAnsi; caracteres
+//! não suportados causam erro explícito, nunca substituição silenciosa.
 use crate::{caminhos::{Caminho, Comando, RegraPreenchimento},
     estilos::{Extremo, Juncao, Preenchimento}, Cena, Cor, Figura};
 use std::fmt::Write;
@@ -16,12 +16,30 @@ pub enum ErroPdf {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FontePdf { Helvetica, Negrito, Italico, NegritoItalico }
+pub enum FontePdf {
+    Helvetica, Negrito, Italico, NegritoItalico,
+    /// Times (fonte padrão do PDF; mesmas métricas da Liberation Serif).
+    Serifa, SerifaNegrito, SerifaItalico, SerifaNegritoItalico,
+    /// Courier: todo caractere mede 600/1000 em.
+    Mono, MonoNegrito, MonoItalico, MonoNegritoItalico,
+}
 impl FontePdf {
     fn indice(self) -> usize {
-        match self { Self::Helvetica => 1, Self::Negrito => 2,
-            Self::Italico => 3, Self::NegritoItalico => 4 }
+        self as usize + 1
     }
+}
+
+/// Os nomes PDF na ordem de `FontePdf` (`/F1` = Helvetica…).
+const NOMES_FONTES: [&str; 12] = [
+    "Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique",
+    "Times-Roman", "Times-Bold", "Times-Italic", "Times-BoldItalic",
+    "Courier", "Courier-Bold", "Courier-Oblique", "Courier-BoldOblique",
+];
+
+/// As quatro Helveticas sempre (os PDFs que só as usam não mudam um byte);
+/// Times e Courier só quando alguma página as usa.
+fn fontes_usadas(extras: bool) -> &'static [&'static str] {
+    if extras { &NOMES_FONTES } else { &NOMES_FONTES[..4] }
 }
 
 /// Texto adicionado após o desenho, posicionado pelo baseline.
@@ -125,6 +143,8 @@ struct Emissor {
     conteudo: String,
     alfas: Vec<(u16, u16, usize)>,
     sombras: Vec<usize>,
+    /// Algum texto usa Times ou Courier.
+    extras: bool,
 }
 impl Emissor {
     fn estado(&mut self, fill: f32, stroke: f32) -> String {
@@ -279,8 +299,7 @@ impl Emissor {
         conteudo.extend_from_slice(bytes);
         conteudo.extend_from_slice(b"endstream");
         let stream_id = self.doc.adicionar(conteudo);
-        let fontes = ["Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"];
-        let ids: Vec<_> = fontes.iter().map(|nome| self.doc.adicionar(format!(
+        let ids: Vec<_> = fontes_usadas(self.extras).iter().map(|nome| self.doc.adicionar(format!(
             "<< /Type /Font /Subtype /Type1 /BaseFont /{nome} /Encoding /WinAnsiEncoding >>"
         ))).collect();
         let paginas = self.doc.adicionar(Vec::new());
@@ -372,7 +391,12 @@ fn base_latin1(b: u8) -> Option<char> {
 }
 
 fn largura_byte(fonte: FontePdf, b: u8) -> u16 {
-    let negrito = matches!(fonte, FontePdf::Negrito | FontePdf::NegritoItalico);
+    use FontePdf::*;
+    if matches!(fonte, Mono | MonoNegrito | MonoItalico | MonoNegritoItalico) {
+        return 600;
+    }
+    // shortcut: Times é medida com a tabela da Helvetica; ter a tabela Times quando alguém medir texto com serifa aqui.
+    let negrito = matches!(fonte, Negrito | NegritoItalico | SerifaNegrito | SerifaNegritoItalico);
     let tab = if negrito { &LARG_NEGRITO } else { &LARG_REGULAR };
     if negrito {
         // Divergências do Helvetica-Bold.afm oficial em relação ao regular.
@@ -434,6 +458,9 @@ pub struct PaginaPdf {
     erro: Option<ErroPdf>,
     recortes: u32,
     substituir: bool,
+    extras: bool,
+    /// Imagens RGB cruas da página: (bytes, largura, altura) em pixels; `/Im1`… na ordem.
+    imagens: Vec<(Vec<u8>, u32, u32)>,
 }
 
 impl DocumentoPdf {
@@ -452,7 +479,7 @@ impl DocumentoPdf {
         self.paginas.push(PaginaPdf {
             largura: largura_pt, altura: altura_pt, conteudo: String::new(),
             erro: if valida { None } else { Some(ErroPdf::DimensaoInvalida) },
-            recortes: 0, substituir: self.substituir,
+            recortes: 0, substituir: self.substituir, extras: false, imagens: Vec::new(),
         });
         self.paginas.last_mut().unwrap()
     }
@@ -464,18 +491,34 @@ impl DocumentoPdf {
             if p.recortes != 0 { return Err(ErroPdf::EstiloInvalido); }
         }
         let mut doc = Documentos::novo();
-        let nomes = ["Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Helvetica-BoldOblique"];
-        let fontes: Vec<usize> = nomes.iter().map(|n| doc.adicionar(format!(
+        let extras = self.paginas.iter().any(|p| p.extras);
+        let fontes: Vec<usize> = fontes_usadas(extras).iter().map(|n| doc.adicionar(format!(
             "<< /Type /Font /Subtype /Type1 /BaseFont /{n} /Encoding /WinAnsiEncoding >>"
         ))).collect();
-        let mut recursos = String::from("<< /Font << ");
+        let mut fontes_dic = String::from("/Font << ");
         for (i, id) in fontes.iter().enumerate() {
-            write!(recursos, "/F{} {id} 0 R ", i + 1).unwrap();
+            write!(fontes_dic, "/F{} {id} 0 R ", i + 1).unwrap();
         }
-        recursos.push_str(">> >>");
+        fontes_dic.push_str(">>");
         let pages = doc.adicionar(Vec::new());
         let mut kids = Vec::new();
         for p in &self.paginas {
+            // Sem imagem, o dicionário de recursos fica igual ao de antes (PDFs antigos não mudam).
+            let mut recursos = format!("<< {fontes_dic} ");
+            if !p.imagens.is_empty() {
+                recursos.push_str("/XObject << ");
+                for (i, (dados, w, h)) in p.imagens.iter().enumerate() {
+                    // shortcut: RGB sem compressão (feather-draw não tem deflate); comprimir quando o tamanho do PDF incomodar.
+                    let mut obj = format!("<< /Type /XObject /Subtype /Image /Width {w} /Height {h} \
+/ColorSpace /DeviceRGB /BitsPerComponent 8 /Length {} >>\nstream\n", dados.len()).into_bytes();
+                    obj.extend_from_slice(dados);
+                    obj.extend_from_slice(b"\nendstream");
+                    let id = doc.adicionar(obj);
+                    write!(recursos, "/Im{} {id} 0 R ", i + 1).unwrap();
+                }
+                recursos.push_str(">> ");
+            }
+            recursos.push_str(">>");
             let bytes = p.conteudo.as_bytes();
             let mut c = format!("<< /Length {} >>\nstream\n", bytes.len()).into_bytes();
             c.extend_from_slice(bytes);
@@ -543,12 +586,43 @@ impl PaginaPdf {
         self.conteudo.push_str("Q\n");
     }
 
+    /// Imagem RGB de 8 bits (`largura_px × altura_px × 3` bytes, linha a linha) esticada em
+    /// (x, y, l, a), com o canto superior esquerdo em (x, y).
+    pub fn imagem_rgb(&mut self, x: f32, y: f32, l: f32, a: f32, rgb: Vec<u8>, largura_px: u32, altura_px: u32) {
+        if largura_px == 0 || altura_px == 0
+            || rgb.len() as u64 != u64::from(largura_px) * u64::from(altura_px) * 3 {
+            self.falha(ErroPdf::DimensaoInvalida);
+            return;
+        }
+        let (px, py, pl, pa) = (self.n(x), self.n(self.altura - y - a), self.n(l), self.n(a));
+        self.imagens.push((rgb, largura_px, altura_px));
+        write!(self.conteudo, "q\n{pl} 0 0 {pa} {px} {py} cm\n/Im{} Do\nQ\n", self.imagens.len()).unwrap();
+    }
+
+    /// Texto com a linha de base começando em (x, y), girado `graus` no sentido anti-horário
+    /// (como a marca d'água na diagonal).
+    pub fn texto_girado(&mut self, x: f32, y: f32, graus: f32, texto: &str, fonte: FontePdf, tamanho: f32, c: Cor) {
+        if !tamanho.is_finite() || tamanho <= 0.0 || !graus.is_finite() { self.falha(ErroPdf::EstiloInvalido); return; }
+        let bytes = match codificar_winansi_modo(texto, self.substituir) {
+            Ok(b) => b, Err(e) => { self.falha(e); return; }
+        };
+        self.extras |= fonte.indice() > 4;
+        let (sen, cos) = graus.to_radians().sin_cos();
+        let (px, py, t) = (self.n(x), self.n(self.altura - y), self.n(tamanho));
+        let (a, b, c2) = (self.n(cos), self.n(sen), self.n(-sen));
+        write!(self.conteudo, "q\n{}BT /F{} {t} Tf {a} {b} {c2} {a} {px} {py} Tm <", cor(c, "rg"),
+            fonte.indice()).unwrap();
+        for b in bytes { write!(self.conteudo, "{b:02X}").unwrap(); }
+        self.conteudo.push_str("> Tj ET\nQ\n");
+    }
+
     /// Texto com a linha de base em (x, y).
     pub fn texto(&mut self, x: f32, y: f32, texto: &str, fonte: FontePdf, tamanho: f32, c: Cor) {
         if !tamanho.is_finite() || tamanho <= 0.0 { self.falha(ErroPdf::EstiloInvalido); return; }
         let bytes = match codificar_winansi_modo(texto, self.substituir) {
             Ok(b) => b, Err(e) => { self.falha(e); return; }
         };
+        self.extras |= fonte.indice() > 4;
         let (px, py, t) = (self.n(x), self.n(self.altura - y), self.n(tamanho));
         write!(self.conteudo, "q\n{}BT /F{} {t} Tf {px} {py} Td <", cor(c, "rg"),
             fonte.indice()).unwrap();
@@ -574,6 +648,7 @@ pub fn exportar_pdf_com_texto(cena: &Cena, textos: &[TextoPdf]) -> Result<Vec<u8
         doc: Documentos::novo(),
         conteudo: format!("q\n1 0 0 -1 0 {} cm\n", num(cena.altura)?),
         alfas: Vec::new(), sombras: Vec::new(),
+        extras: textos.iter().any(|t| t.fonte.indice() > 4),
     };
     for figura in &cena.figuras { e.figura(figura)?; }
     for texto in textos { e.texto(texto)?; }
@@ -766,7 +841,41 @@ mod testes {
             .texto(0.0, 10.0, "東", FontePdf::Helvetica, 10.0, Cor::rgb(0, 0, 0));
         assert!(String::from_utf8_lossy(&d.finalizar().unwrap()).contains("<3F> Tj"));
         assert_eq!(largura_texto("Hello", FontePdf::Helvetica, 1000.0), 2278.0);
+        assert_eq!(largura_texto("ab", FontePdf::Mono, 10.0), 12.0);
         assert_eq!(largura_texto("ã", FontePdf::Helvetica, 1000.0), 556.0);
         assert_eq!(DocumentoPdf::novo().finalizar(), Err(ErroPdf::DimensaoInvalida));
+    }
+
+    #[test]
+    fn times_e_courier_so_entram_quando_usadas() {
+        let mut so_helvetica = DocumentoPdf::novo();
+        so_helvetica.adicionar_pagina(100.0, 100.0).texto(0.0, 10.0, "a", FontePdf::Helvetica, 10.0, Cor::rgb(0, 0, 0));
+        let s = String::from_utf8_lossy(&so_helvetica.finalizar().unwrap()).into_owned();
+        assert!(!s.contains("Times-Roman") && !s.contains("/F5"));
+
+        let mut com_serifa = DocumentoPdf::novo();
+        com_serifa.adicionar_pagina(100.0, 100.0)
+            .texto(0.0, 10.0, "ação", FontePdf::Serifa, 10.0, Cor::rgb(0, 0, 0));
+        com_serifa.adicionar_pagina(100.0, 100.0)
+            .texto(0.0, 10.0, "x", FontePdf::MonoNegritoItalico, 10.0, Cor::rgb(0, 0, 0));
+        let s = String::from_utf8_lossy(&com_serifa.finalizar().unwrap()).into_owned();
+        assert!(s.contains("/BaseFont /Times-Roman") && s.contains("/BaseFont /Courier-BoldOblique"));
+        assert!(s.contains("BT /F5 10 Tf") && s.contains("BT /F12 10 Tf") && s.contains("/F12 "));
+    }
+
+    #[test]
+    fn imagem_e_texto_girado_na_pagina() {
+        let mut d = DocumentoPdf::novo();
+        let p = d.adicionar_pagina(100.0, 100.0);
+        p.imagem_rgb(10.0, 10.0, 20.0, 30.0, vec![255, 0, 0, 0, 255, 0], 2, 1);
+        p.texto_girado(50.0, 50.0, 90.0, "M", FontePdf::Helvetica, 10.0, Cor::rgb(0, 0, 0));
+        let s = String::from_utf8_lossy(&d.finalizar().unwrap()).into_owned();
+        assert!(s.contains("/Subtype /Image /Width 2 /Height 1"));
+        assert!(s.contains("/XObject << /Im1 ") && s.contains("20 0 0 30 10 60 cm\n/Im1 Do"));
+        assert!(s.contains("0 1 -1 0 50 50 Tm"));
+
+        let mut ruim = DocumentoPdf::novo();
+        ruim.adicionar_pagina(10.0, 10.0).imagem_rgb(0.0, 0.0, 1.0, 1.0, vec![0; 5], 2, 1);
+        assert_eq!(ruim.finalizar(), Err(ErroPdf::DimensaoInvalida));
     }
 }

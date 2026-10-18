@@ -1,6 +1,6 @@
 [package]
 name = "feather-draw"
-version = "0.1.1"
+version = "0.1.2"
 description = "Motor vetorial compartilhado da suíte FeatherOffice: geometria, caminhos, estilos, SVG, PDF, unidades e tinta com pressão da caneta"
 authors = ["FeatherOffice"]
 edition = "2021"
