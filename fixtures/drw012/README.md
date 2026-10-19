@@ -1,6 +1,6 @@
 # DRW-012 — snapshots comparáveis: Drawing, SVG, PDF e Iced
 
-> Cópia do corpus `featheroffice/fixtures/drw012/` do monorepo FeatherOffice, onde o FeatherSlide também o usa. Os comandos com `featherslide/` e `featheroffice/scripts/` valem dentro do monorepo.
+> Cópia do corpus `featheroffice/fixtures/drw012/` do monorepo FeatherWorks, onde o FeatherSlide também o usa. Os comandos com `featherslide/` e `featheroffice/scripts/` valem dentro do monorepo.
 
 **Status:** testes e corpus publicados na `main`; `[/]` até confirmação de Cargo e **captura visual real da GUI** em Linux/Windows. Este teste não pode, sozinho, provar igualdade de pixels rasterizados.
 

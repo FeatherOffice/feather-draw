@@ -57,7 +57,7 @@ fn executar() -> Result<(), String> {
 
     let svg = exportar_svg(&cena).map_err(|e| format!("SVG: {e:?}"))?;
     let pdf = exportar_pdf_com_texto(&cena, &[TextoPdf {
-        texto: "Estilos vetoriais FeatherOffice".into(),
+        texto: "Estilos vetoriais FeatherWorks".into(),
         x: 40.0,
         y: 125.0,
         tamanho: texto.tamanho,

@@ -1,12 +1,12 @@
 [package]
 name = "feather-draw"
 version = "0.1.3"
-description = "Motor vetorial compartilhado da suíte FeatherOffice: geometria, caminhos, estilos, SVG, PDF, unidades e tinta com pressão da caneta"
-authors = ["FeatherOffice"]
+description = "Motor vetorial compartilhado da suíte FeatherWorks: geometria, caminhos, estilos, SVG, PDF, unidades e tinta com pressão da caneta"
+authors = ["FeatherWorks"]
 edition = "2021"
 rust-version = "1.77.2"
 license = "GPL-3.0-only"
-repository = "https://github.com/FeatherOffice/feather-draw"
+repository = "https://github.com/feather-works/feather-draw"
 publish = false
 
 [dependencies]

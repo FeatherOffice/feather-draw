@@ -1,6 +1,6 @@
 # feather-draw
 
-Motor vetorial compartilhado da suíte **FeatherOffice**: geometria, caminhos,
+Motor vetorial compartilhado da suíte **FeatherWorks**: geometria, caminhos,
 estilos, unidades, exportação para SVG e PDF e a tinta à mão livre da aba
 Desenhar, com pressão da caneta.
 
@@ -8,9 +8,9 @@ Desenhar, com pressão da caneta.
 dentro do próprio executável. Quem instala só a planilha não precisa instalar
 `feather-draw` à parte, nem DLL ou `.so`.
 
-Antes se chamava `featheroffice-drawing` e morava no monorepo FeatherOffice;
+Antes se chamava `featheroffice-drawing` e morava no monorepo FeatherWorks;
 os motores comuns perderam o "office" no nome, no mesmo padrão da
-[`feather-ui`](https://github.com/FeatherOffice/feather-ui).
+[`feather-ui`](https://github.com/feather-works/feather-ui).
 
 ## Por que ela existe
 
@@ -40,7 +40,7 @@ dependências externas: só a biblioteca padrão do Rust.
 ## Quem usa
 
 FeatherSheet, FeatherSlide, FeatherDocs, FeatherPDF e FeatherCAD, além dos
-motores comuns do monorepo FeatherOffice (`featheroffice-charts`,
+motores comuns do monorepo FeatherWorks (`featheroffice-charts`,
 `featheroffice-io`, `featheroffice-app-adapters`). A interface da aba
 Desenhar fica na `feather-ui` (módulo `tinta`); o motor dos traços fica aqui.
 
@@ -50,14 +50,14 @@ No `Cargo.toml` do aplicativo:
 
 ```toml
 [dependencies]
-feather-draw = { git = "https://github.com/FeatherOffice/feather-draw", tag = "v0.1.0" }
+feather-draw = { git = "https://github.com/feather-works/feather-draw", tag = "v0.1.0" }
 ```
 
 Para desenvolver a biblioteca e o aplicativo lado a lado, aponte para a cópia
 local sem mudar a dependência acima (no pacote raiz da compilação):
 
 ```toml
-[patch."https://github.com/FeatherOffice/feather-draw"]
+[patch."https://github.com/feather-works/feather-draw"]
 feather-draw = { path = "../feather-draw" }
 ```
 
