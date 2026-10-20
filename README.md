@@ -87,4 +87,4 @@ própria: o crate só transforma dados em memória que o aplicativo entrega.
 
 ## Licença
 
-GPL-3.0 (ver [`LICENSE`](LICENSE)).
+MIT (ver [`LICENSE`](LICENSE)).
